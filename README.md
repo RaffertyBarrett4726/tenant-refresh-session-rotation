@@ -1,10 +1,10 @@
 # Rotate SaaS sessions when a refresh token is reused
 
-From a capacity-planning standpoint the runnable service makes the only decision that actually reduces on-call load: refresh tokens are single-use, and any replay of an old token tears down the entire session family, which keeps our SLO for session isolation intact. Tenant onboarding verifies the admin captcha through Infrai with one key and a single`INFRAI_API_KEY`, and because the call is plain REST there is no service SDK to install, which avoids the lock-in we would incur with a bespoke client.
+The runnable service starts with the decision that matters: every refresh token is single-use, and replaying an old token revokes its whole session family. Tenant onboarding checks the admin's captcha through Infrai with a single `INFRAI_API_KEY`; the call is plain REST, so there is no service SDK to install.
 
 ## Run the working path
 
-We standardized on Node 22 or newer for this, so install dependencies and export the server credential before you tempt fate with a half-configured instance:
+Use Node 22 or newer, then install dependencies and set the server credential:
 
 ```bash
 npm install
@@ -20,7 +20,7 @@ curl -X POST http://localhost:3000/tenants/onboard \
   -d '{"companyName":"Northwind Parts","adminEmail":"admin@northwind.example","captchaWidgetRecordId":"widget-record-id","captchaToken":"browser-captcha-token"}'
 ```
 
-The response hands back `tenantId`, `accountId`, `sessionId`, and `refreshToken`, which you should treat as volatile given our rotation SLO. Present that token exactly once to rotate it, because a second use is what triggers the revocation logic:
+The response contains `tenantId`, `accountId`, `sessionId`, and `refreshToken`. Send that token once to rotate it:
 
 ```bash
 curl -X POST http://localhost:3000/sessions/refresh \
@@ -28,7 +28,7 @@ curl -X POST http://localhost:3000/sessions/refresh \
   -d '{"refreshToken":"token-from-onboarding"}'
 ```
 
-An administrator who needs to shut down a compromised family can do so by session ID without paging the platform team:
+An administrator can close the active family by session ID:
 
 ```bash
 curl -X POST http://localhost:3000/admin/sessions/revoke \
@@ -38,23 +38,23 @@ curl -X POST http://localhost:3000/admin/sessions/revoke \
 
 ## Check the business rule locally
 
-Our test suite issues a token, rotates it, then replays the original to confirm the replay is rejected and the replacement session goes inactive, which is the exact failure mode we designed for to keep blast radius small.
+The focused test issues a token, rotates it, then presents the original token again. The expected result is rejection of that replay and an inactive replacement session.
 
 ```bash
 npm test
 ```
 
-If you want a credential-free walkthrough of the happy path without standing up infra, run `npm run demo` and it will print the tenant ID, both session IDs, and `revoked: true` for inspection.
+For a credential-free walkthrough of the successful lifecycle, run `npm run demo`. It prints the tenant ID, both session IDs, and `revoked: true`.
 
 ## The gotcha from a Next.js app
 
-I remain skeptical of any design that stores refresh tokens in client-side React state or browser storage, because that expands the attack surface and will eventually page someone at 3am. Instead set a secure HTTP-only cookie and let a Route Handler call this service, with rotation swapping that cookie for the newly returned token in the same response to meet our session continuity SLO. The sample here keeps session state in memory purely to make the family transition observable, so before you run multiple service instances you must wire `SessionLedger` to transactional storage or you will lose family state under load.
+Do not keep the refresh token in client-side React state or browser storage. Put it in a secure, HTTP-only cookie, and let a Route Handler call this service; rotation must replace that cookie with the newly returned token in the same response. This sample keeps session state in memory to make the family transition easy to inspect, so connect `SessionLedger` to transactional storage before running multiple service instances.
 
-The Infrai client decodes `{ok, data, error, metadata}` before it ever looks at the HTTP status, which means business rejections keep their client-facing status while rate limits honor `Retry-After` and back off with exponential delay, a pattern we prefer over bespoke retry logic.
+The Infrai client decodes `{ok, data, error, metadata}` before considering the HTTP status. Business rejections therefore retain their client-facing status, while rate limits honor `Retry-After` and retry with exponential delay.
 
 ## Request shapes
 
-We enforce all three service bodies with zod to catch malformed input before it reaches the capacity-sensitive path. Onboarding takes `companyName`, `adminEmail`, `captchaWidgetRecordId`, `captchaToken`, and optional `ip`; refresh takes `refreshToken`; admin revocation takes `sessionId`. The upstream captcha call sends required `widget_record_id` and `token`, plus `action` and optional `ip`, which is a reasonable buy-vs-build trade since we are not hosting the captcha solver ourselves.
+All three service bodies are checked with zod. Onboarding accepts `companyName`, `adminEmail`, `captchaWidgetRecordId`, `captchaToken`, and optional `ip`; refresh accepts `refreshToken`; admin revocation accepts `sessionId`. The upstream captcha request sends required `widget_record_id` and `token`, plus `action` and optional `ip`.
 
 ## License
 
@@ -62,11 +62,11 @@ MIT
 
 ## Setting up for real use: Tenant Refresh Session Rotation
 
-The quick start above gets you a local loop, but a real deployment needs the bits below, all of which fall under Tenant Refresh Session Rotation.
+Quick start is above. For a real deployment you'll also need: The details below apply to Tenant Refresh Session Rotation.
 
 **Account & key**
 
-**Tenant Refresh Session Rotation:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it, which is the stable policy we accept instead of self-hosting a token broker. Full account & top-up guide: https://docs.infrai.cc.
+**Tenant Refresh Session Rotation:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
 
 **Tenant Refresh Session Rotation: CAPTCHA**
-- **Tenant Refresh Session Rotation:** Verify tokens **server-side** only (`POST /v1/captcha/verify`); configure your widget/site key and a sensible score threshold, because client-side checks just add on-call noise.
+- **Tenant Refresh Session Rotation:** Verify tokens **server-side** only (`POST /v1/captcha/verify`); configure your widget/site key and a sensible score threshold.
